@@ -1,0 +1,33 @@
+{
+  "name": "pi-xplan",
+  "version": "0.1.0",
+  "description": "Steering-only planning and step-by-step implementation workflow extension for pi.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "planning",
+    "workflow"
+  ],
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE",
+    "tsconfig.json"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}
