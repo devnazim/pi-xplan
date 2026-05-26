@@ -63,6 +63,10 @@ pi install .
 8. Preview the whole plan with `/xplan preview`, using checkmarks for completed steps.
 9. On the last implementation step, review the full feature, run/check reasonable validation if available, and fix issues before stopping.
 
+## Debugging
+
+Run pi with `--xplan-debug` to print xplan state-machine logs to stderr.
+
 ## Important notes
 
 This extension is intentionally simple:

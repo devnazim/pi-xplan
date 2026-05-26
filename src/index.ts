@@ -18,6 +18,12 @@ interface XPlanState {
 	updatedAt: number;
 }
 
+interface XPlanRestoreResult {
+	state: XPlanState;
+	restored?: Partial<XPlanState>;
+	inferred?: XPlanState;
+}
+
 const STATE_ENTRY_TYPE = "xplan-state";
 const MUTATING_TOOLS = new Set(["edit", "write"]);
 const MUTATING_BASH_PATTERNS = [
@@ -70,13 +76,40 @@ function cloneState(state: XPlanState): XPlanState {
 	return { ...state };
 }
 
-function normalizeState(restored?: Partial<XPlanState>): XPlanState {
+function stateForLog(state?: Partial<XPlanState>): Partial<XPlanState> | undefined {
+	if (!state) return undefined;
+
+	return {
+		active: state.active,
+		mode: state.mode,
+		phase: state.phase,
+		task: state.task,
+		currentStep: state.currentStep,
+		updatedAt: state.updatedAt,
+	};
+}
+
+let debugLoggingEnabled = false;
+
+function logDebug(event: string, details: Record<string, unknown>): void {
+	if (!debugLoggingEnabled) return;
+
+	console.error(`[xplan] ${event} ${JSON.stringify(details)}`);
+}
+
+function isRelevantForLog(state?: Partial<XPlanState>): boolean {
+	return state?.active === true || (state?.phase !== undefined && state.phase !== "complete");
+}
+
+function normalizeState(restored?: Partial<XPlanState>, options: { preserveImplementing?: boolean } = {}): XPlanState {
 	const next = { ...DEFAULT_STATE, ...restored };
 
-	// Implementation approval is turn-local. If pi resumes/reloads while the
-	// persisted state says "implementing", fail closed and require a fresh
-	// /xplan continue or /xplan approve before allowing mutations again.
-	if (next.active && next.phase === "implementing") {
+	// Implementation approval is turn-local. If pi resumes while the persisted
+	// state says "implementing", fail closed and require a fresh /xplan continue
+	// or /xplan approve before allowing mutations again. Preserve it across hot
+	// extension reloads so editing this extension during an approved turn does
+	// not relock later tool calls in the same turn.
+	if (next.active && next.phase === "implementing" && !options.preserveImplementing) {
 		next.phase = "awaiting_review";
 	}
 
@@ -142,15 +175,21 @@ function inferStateFromHistory(entries: readonly unknown[]): XPlanState | undefi
 	return inferred;
 }
 
-function restoreState(ctx: ExtensionContext): XPlanState {
+function restoreState(ctx: ExtensionContext, options: { preserveImplementing?: boolean } = {}): XPlanRestoreResult {
 	const entries = ctx.sessionManager.getBranch();
 	const restored = [...entries]
 		.reverse()
-		.find((entry): entry is { type: "custom"; customType: string; data?: Partial<XPlanState> } => {
-			return entry.type === "custom" && entry.customType === STATE_ENTRY_TYPE;
-		});
+		.find((entry) => entry.type === "custom" && entry.customType === STATE_ENTRY_TYPE) as
+		| { data?: Partial<XPlanState> }
+		| undefined;
+	const inferred = restored ? undefined : inferStateFromHistory(entries);
+	const source = restored?.data ?? inferred;
 
-	return normalizeState(restored?.data ?? inferStateFromHistory(entries));
+	return {
+		state: normalizeState(source, options),
+		restored: restored?.data,
+		inferred,
+	};
 }
 
 function persistState(pi: ExtensionAPI, state: XPlanState): void {
@@ -358,10 +397,31 @@ Xplan steps mode:
 }
 
 export default function xplanExtension(pi: ExtensionAPI): void {
+	pi.registerFlag("xplan-debug", {
+		description: "Enable xplan state-machine debug logging",
+		type: "boolean",
+		default: false,
+	});
+	debugLoggingEnabled = pi.getFlag("xplan-debug") === true;
+
 	let state: XPlanState = { ...DEFAULT_STATE };
 
+	let currentTurnIndex: number | undefined;
+
 	function setState(ctx: ExtensionContext, transition: XPlanTransition): void {
+		const previousState = cloneState(state);
 		state = transitionState(state, transition);
+
+		logDebug("state_transition", {
+			transition: transition.type,
+			turnIndex: currentTurnIndex,
+			isIdle: ctx.isIdle(),
+			hasPendingMessages: ctx.hasPendingMessages(),
+			signalActive: ctx.signal !== undefined,
+			previousState: stateForLog(previousState),
+			nextState: stateForLog(state),
+		});
+
 		persistState(pi, state);
 		updateStatus(ctx, state);
 	}
@@ -475,21 +535,97 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 
 	pi.on("tool_call", async (event, ctx) => {
 		const reason = mutationBlockReason(state, event.toolName, event.input);
+		if (state.active && (reason || MUTATING_TOOLS.has(event.toolName) || event.toolName === "bash")) {
+			logDebug("tool_call", {
+				toolName: event.toolName,
+				toolCallId: event.toolCallId,
+				turnIndex: currentTurnIndex,
+				isIdle: ctx.isIdle(),
+				hasPendingMessages: ctx.hasPendingMessages(),
+				signalActive: ctx.signal !== undefined,
+				state: stateForLog(state),
+				blocked: reason !== undefined,
+				reason,
+			});
+		}
 		if (!reason) return undefined;
 
 		notify(ctx, reason, "warning");
 		return { block: true, reason };
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
-		if (!state.active || state.phase !== "implementing") return;
+	pi.on("turn_start", async (event, ctx) => {
+		currentTurnIndex = event.turnIndex;
+		if (!state.active) return;
 
-		setState(ctx, { type: "finish_implementation" });
-		notify(ctx, "xplan implementation step finished. Review/stage manually, then use /xplan continue or /xplan complete.", "info");
+		logDebug("turn_start", {
+			turnIndex: currentTurnIndex,
+			isIdle: ctx.isIdle(),
+			hasPendingMessages: ctx.hasPendingMessages(),
+			signalActive: ctx.signal !== undefined,
+			state: stateForLog(state),
+		});
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
-		state = restoreState(ctx);
+	pi.on("turn_end", async (event, ctx) => {
+		if (!state.active) return;
+
+		logDebug("turn_end", {
+			turnIndex: event.turnIndex,
+			isIdle: ctx.isIdle(),
+			hasPendingMessages: ctx.hasPendingMessages(),
+			signalActive: ctx.signal !== undefined,
+			state: stateForLog(state),
+		});
+	});
+
+	pi.on("agent_end", async (_event, ctx) => {
+		if (state.active) {
+			logDebug("agent_end", {
+				turnIndex: currentTurnIndex,
+				isIdle: ctx.isIdle(),
+				hasPendingMessages: ctx.hasPendingMessages(),
+				signalActive: ctx.signal !== undefined,
+				state: stateForLog(state),
+			});
+		}
+
+		if (state.active && state.phase === "implementing") {
+			setState(ctx, { type: "finish_implementation" });
+			notify(ctx, "xplan implementation step finished. Review/stage manually, then use /xplan continue or /xplan complete.", "info");
+		}
+
+		currentTurnIndex = undefined;
+	});
+
+	pi.on("session_start", async (event, ctx) => {
+		debugLoggingEnabled = pi.getFlag("xplan-debug") === true;
+		const previousState = cloneState(state);
+		const idle = ctx.isIdle();
+		const preserveImplementing = event.reason === "reload";
+		const restored = restoreState(ctx, { preserveImplementing });
+		state = restored.state;
+
+		if (
+			event.reason === "reload" ||
+			isRelevantForLog(previousState) ||
+			isRelevantForLog(restored.restored) ||
+			isRelevantForLog(restored.inferred) ||
+			isRelevantForLog(state)
+		) {
+			logDebug("session_start", {
+				reason: event.reason,
+				isIdle: idle,
+				hasPendingMessages: ctx.hasPendingMessages(),
+				signalActive: ctx.signal !== undefined,
+				preserveImplementing,
+				previousState: stateForLog(previousState),
+				restoredState: stateForLog(restored.restored),
+				inferredState: stateForLog(restored.inferred),
+				normalizedState: stateForLog(state),
+			});
+		}
+
 		updateStatus(ctx, state);
 	});
 
