@@ -1,7 +1,7 @@
 {
   "name": "pi-xplan",
-  "version": "0.1.0",
-  "description": "Steering-only planning and step-by-step implementation workflow extension for pi.",
+  "version": "0.1.1",
+  "description": "Planning and step-by-step implementation workflow extension for pi with lightweight mutation guards.",
   "type": "module",
   "license": "MIT",
   "keywords": [

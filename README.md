@@ -1,6 +1,6 @@
 # pi-xplan
 
-A small steering-only planning extension for [pi](https://pi.dev/).
+A small planning workflow extension for [pi](https://pi.dev/) with lightweight mutation guards.
 
 It adds one slash command, `/xplan`, for regular planning and bottom-up step-by-step implementation planning.
 
@@ -65,11 +65,11 @@ pi install .
 
 ## Important notes
 
-This extension is intentionally simple and steering-only:
+This extension is intentionally simple:
 
 - No custom tools.
-- No file security enforcement.
 - No settings UI.
 - No git automation.
+- Built-in `edit`/`write` tools and obvious mutating `bash` commands are blocked unless xplan is in the approved `implementing` phase.
 
-The agent is instructed to never stage, unstage, commit, push, pull, merge, rebase, stash, reset, restore, checkout files, cherry-pick, or otherwise mutate git history/state. The user manages git manually.
+The agent is also instructed to never stage, unstage, commit, push, pull, merge, rebase, stash, reset, restore, checkout files, cherry-pick, or otherwise mutate git history/state. The user manages git manually.
