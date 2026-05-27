@@ -75,5 +75,6 @@ This extension is intentionally simple:
 - No settings UI.
 - No git automation.
 - Built-in `edit`/`write` tools and obvious mutating `bash` commands are blocked unless xplan is in the approved `implementing` phase.
+- Failed or interrupted implementation attempts are marked as `implementation failed`; `/xplan continue` retries the same approved scope/step instead of advancing.
 
 The agent is also instructed to never stage, unstage, commit, push, pull, merge, rebase, stash, reset, restore, checkout files, cherry-pick, or otherwise mutate git history/state. The user manages git manually.

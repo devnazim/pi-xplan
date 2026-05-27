@@ -1,12 +1,13 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 type XPlanMode = "regular" | "steps";
-type XPlanPhase = "planning" | "implementing" | "awaiting_review" | "complete";
+type XPlanPhase = "planning" | "implementing" | "implementation_failed" | "awaiting_review" | "complete";
 type XPlanTransition =
 	| { type: "start"; mode: XPlanMode; task?: string }
 	| { type: "approve" }
 	| { type: "continue" }
-	| { type: "finish_implementation" }
+	| { type: "resume_implementation" }
+	| { type: "finish_implementation"; outcome: "success" | "failed" }
 	| { type: "complete" };
 
 interface XPlanState {
@@ -110,7 +111,7 @@ function normalizeState(restored?: Partial<XPlanState>, options: { preserveImple
 	// extension reloads so editing this extension during an approved turn does
 	// not relock later tool calls in the same turn.
 	if (next.active && next.phase === "implementing" && !options.preserveImplementing) {
-		next.phase = "awaiting_review";
+		next.phase = "implementation_failed";
 	}
 
 	return next;
@@ -215,14 +216,20 @@ function transitionState(state: XPlanState, transition: XPlanTransition): XPlanS
 		}
 		case "continue": {
 			if (!state.active) return state;
+			if (state.phase === "implementation_failed") {
+				return { ...state, phase: "implementing", currentStep: Math.max(1, state.currentStep) };
+			}
 			if (state.mode === "steps") {
 				return { ...state, phase: "implementing", currentStep: Math.max(1, state.currentStep + 1) };
 			}
 			return { ...state, phase: "planning" };
 		}
+		case "resume_implementation":
+			if (!state.active || state.phase !== "implementation_failed") return state;
+			return { ...state, phase: "implementing" };
 		case "finish_implementation":
 			if (!state.active || state.phase !== "implementing") return state;
-			return { ...state, phase: "awaiting_review" };
+			return { ...state, phase: transition.outcome === "success" ? "awaiting_review" : "implementation_failed" };
 		case "complete":
 			return { ...state, active: false, phase: "complete", task: undefined, currentStep: 0 };
 	}
@@ -232,9 +239,10 @@ function statusText(state: XPlanState): string {
 	if (!state.active) return "xplan: inactive";
 
 	const mode = state.mode === "steps" ? "steps" : "plan";
+	const phase = state.phase.replaceAll("_", " ");
 	const task = state.task ? ` — ${state.task}` : "";
 	const step = state.mode === "steps" && state.currentStep > 0 ? `, step ${state.currentStep}` : "";
-	return `xplan: ${mode}, ${state.phase}${step}${task}`;
+	return `xplan: ${mode}, ${phase}${step}${task}`;
 }
 
 function updateStatus(ctx: ExtensionContext, state: XPlanState): void {
@@ -247,7 +255,8 @@ function updateStatus(ctx: ExtensionContext, state: XPlanState): void {
 
 	const label = state.mode === "steps" ? "xplan steps" : "xplan";
 	const phase = state.phase.replaceAll("_", " ");
-	ctx.ui.setStatus("xplan", ctx.ui.theme.fg("accent", `${label}: ${phase}`));
+	const color = state.phase === "implementation_failed" ? "error" : "accent";
+	ctx.ui.setStatus("xplan", ctx.ui.theme.fg(color, `${label}: ${phase}`));
 }
 
 function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info"): void {
@@ -258,8 +267,29 @@ function isBashMutation(command: string): boolean {
 	return MUTATING_BASH_PATTERNS.some((pattern) => pattern.test(command));
 }
 
-function mutationBlockReason(state: XPlanState, toolName: string, input: unknown): string | undefined {
-	if (!state.active || state.phase === "implementing") return undefined;
+function implementationFailed(messages: readonly unknown[]): boolean {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (typeof message !== "object" || message === null || !("role" in message) || message.role !== "assistant") continue;
+		return "stopReason" in message && (message.stopReason === "error" || message.stopReason === "aborted");
+	}
+
+	return true;
+}
+
+function mutationBlockReason(
+	state: XPlanState,
+	toolName: string,
+	input: unknown,
+	options: { allowFailedImplementationMutations?: boolean } = {},
+): string | undefined {
+	if (
+		!state.active ||
+		state.phase === "implementing" ||
+		(state.phase === "implementation_failed" && options.allowFailedImplementationMutations)
+	) {
+		return undefined;
+	}
 
 	if (MUTATING_TOOLS.has(toolName)) {
 		return `xplan is ${state.phase.replaceAll("_", " ")}; file edits are blocked until /xplan approve or /xplan continue.`;
@@ -327,8 +357,16 @@ After this approval, /xplan continue is enough to implement each next pending pl
 Implement the approved scope. Do not change git stage, commit, push, pull, rebase, stash, reset, or otherwise mutate git history/state. Review your changes and fix issues you find before stopping for my manual review.`;
 }
 
-function continuePrompt(state: XPlanState): string {
+function continuePrompt(state: XPlanState, options: { retry?: boolean } = {}): string {
 	if (state.mode === "steps") {
+		if (options.retry) {
+			return `[xplan continue] The previous implementation attempt for this step failed or was interrupted.
+
+The bottom-up step plan is already approved. Retry step ${state.currentStep}. Keep the diff review-friendly and stay inside this step's approved scope. Do not advance to the next planned step yet.
+
+Never change git stage, commit, push, pull, rebase, stash, reset, or otherwise mutate git history/state.`;
+		}
+
 		return `[xplan continue] I have reviewed/staged the previous step manually.
 
 The bottom-up step plan is already approved. This /xplan continue command is approval to implement the next pending planned step; do not ask for /xplan approve again merely because the next step edits an existing file or a file touched by an earlier pending/planned step.
@@ -338,6 +376,12 @@ Continue the bottom-up step-by-step plan. If there is another planned step, impl
 Only ask for /xplan approve again if the agreed plan/scope changes or you need to rework a completed/reviewed step due to a conflict.
 
 Never change git stage, commit, push, pull, rebase, stash, reset, or otherwise mutate git history/state.`;
+	}
+
+	if (options.retry) {
+		return `[xplan continue] The previous implementation attempt failed or was interrupted.
+
+Retry the approved xplan implementation scope. Do not change git stage, commit, push, pull, rebase, stash, reset, or otherwise mutate git history/state. Review your changes and fix issues you find before stopping for my manual review.`;
 	}
 
 	return `[xplan continue] I have reviewed the previous implementation manually.
@@ -368,7 +412,8 @@ Hard workflow rules:
 - xplan blocks built-in edit/write tools and obvious mutating bash commands unless the state is implementing.
 - Never run git commands that stage, unstage, commit, push, pull, merge, rebase, stash, reset, restore, checkout files, cherry-pick, or otherwise mutate git history/state.
 - The user reviews and stages files manually with git.
-- Do not edit files or run mutating commands while xplan is in planning/discussion or awaiting-review mode. Wait for /xplan approve or /xplan continue.
+- Do not edit files or run mutating commands while xplan is in planning/discussion, implementation-failed, or awaiting-review mode. Wait for /xplan approve or /xplan continue.
+- If implementation failed or was interrupted, /xplan continue retries the same approved scope/step instead of advancing.
 - After an approved implementation, stop for manual review/staging. Do not continue implementing more scope until /xplan continue or another explicit approval.
 - In approved step mode, /xplan continue is explicit approval to implement the next pending planned step. Do not ask for /xplan approve again merely because that pending step edits an existing file.
 - If the agreed plan/scope changes after completed/reviewed steps and conflicts with previous work, clearly warn that completed steps have conflicts. Explain what must be resolved and wait for /xplan approve before reworking completed/reviewed files.
@@ -405,6 +450,7 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 	debugLoggingEnabled = pi.getFlag("xplan-debug") === true;
 
 	let state: XPlanState = { ...DEFAULT_STATE };
+	let approvedImplementationTurnActive = false;
 
 	let currentTurnIndex: number | undefined;
 
@@ -421,6 +467,14 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 			previousState: stateForLog(previousState),
 			nextState: stateForLog(state),
 		});
+
+		if (transition.type === "approve" || transition.type === "continue" || transition.type === "resume_implementation") {
+			approvedImplementationTurnActive = state.phase === "implementing";
+		} else if (transition.type === "start" || transition.type === "complete") {
+			approvedImplementationTurnActive = false;
+		} else if (transition.type === "finish_implementation" && transition.outcome === "success") {
+			approvedImplementationTurnActive = false;
+		}
 
 		persistState(pi, state);
 		updateStatus(ctx, state);
@@ -490,9 +544,10 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 					return;
 				}
 
+				const retry = state.phase === "implementation_failed";
 				const continuedState = transitionState(state, { type: "continue" });
 				setState(ctx, { type: "continue" });
-				sendUserMessage(pi, ctx, continuePrompt(continuedState));
+				sendUserMessage(pi, ctx, continuePrompt(continuedState, { retry }));
 				return;
 			}
 
@@ -527,6 +582,9 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 
 	pi.on("before_agent_start", async (event) => {
 		if (!state.active || state.phase === "complete") return undefined;
+		if (state.phase === "implementation_failed") {
+			approvedImplementationTurnActive = false;
+		}
 
 		return {
 			systemPrompt: event.systemPrompt + activeInstructions(state),
@@ -534,7 +592,9 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
-		const reason = mutationBlockReason(state, event.toolName, event.input);
+		const reason = mutationBlockReason(state, event.toolName, event.input, {
+			allowFailedImplementationMutations: approvedImplementationTurnActive,
+		});
 		if (state.active && (reason || MUTATING_TOOLS.has(event.toolName) || event.toolName === "bash")) {
 			logDebug("tool_call", {
 				toolName: event.toolName,
@@ -557,6 +617,9 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 	pi.on("turn_start", async (event, ctx) => {
 		currentTurnIndex = event.turnIndex;
 		if (!state.active) return;
+		if (state.phase === "implementation_failed" && approvedImplementationTurnActive) {
+			setState(ctx, { type: "resume_implementation" });
+		}
 
 		logDebug("turn_start", {
 			turnIndex: currentTurnIndex,
@@ -579,7 +642,7 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 		});
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_end", async (event, ctx) => {
 		if (state.active) {
 			logDebug("agent_end", {
 				turnIndex: currentTurnIndex,
@@ -591,8 +654,13 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 		}
 
 		if (state.active && state.phase === "implementing") {
-			setState(ctx, { type: "finish_implementation" });
-			notify(ctx, "xplan implementation step finished. Review/stage manually, then use /xplan continue or /xplan complete.", "info");
+			const failed = implementationFailed(event.messages);
+			setState(ctx, { type: "finish_implementation", outcome: failed ? "failed" : "success" });
+			if (failed) {
+				notify(ctx, "xplan implementation step failed or was interrupted. Fix/retry with /xplan continue when ready.", "warning");
+			} else {
+				notify(ctx, "xplan implementation step finished. Review/stage manually, then use /xplan continue or /xplan complete.", "info");
+			}
 		}
 
 		currentTurnIndex = undefined;
