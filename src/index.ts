@@ -402,6 +402,16 @@ Show the whole plan in a compact reviewable format. Use status marks:
 If the plan has changed, show the latest agreed version. If completed steps conflict with a changed plan, warn clearly. Do not edit files or run mutating commands.`;
 }
 
+function inactiveInstructions(): string {
+	return `
+
+XPLAN EXTENSION INACTIVE
+- xplan is not active for this turn.
+- Do not ask the user to run /xplan approve or /xplan continue.
+- Treat normal user replies as ordinary approval/instructions when appropriate.
+- Only use xplan commands after the user starts /xplan or /xplan steps.`;
+}
+
 function activeInstructions(state: XPlanState): string {
 	const base = `
 
@@ -511,8 +521,12 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 			}
 
 			if (subcommand === "approve") {
-				if (!state.active) {
-					notify(ctx, "No active xplan. Start with /xplan or /xplan steps.", "warning");
+				if (!state.active || state.phase === "complete") {
+					notify(
+						ctx,
+						"No active xplan. /xplan approve only applies after starting /xplan or /xplan steps; if you are approving normal work, reply normally instead.",
+						"warning",
+					);
 					return;
 				}
 				if (!ctx.isIdle()) {
@@ -531,8 +545,12 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 			}
 
 			if (subcommand === "continue") {
-				if (!state.active) {
-					notify(ctx, "No active xplan. Start with /xplan or /xplan steps.", "warning");
+				if (!state.active || state.phase === "complete") {
+					notify(
+						ctx,
+						"No active xplan. Start with /xplan or /xplan steps to use xplan commands; if you are approving normal work, reply normally instead of using /xplan approve.",
+						"warning",
+					);
 					return;
 				}
 				if (!ctx.isIdle()) {
@@ -552,8 +570,12 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 			}
 
 			if (subcommand === "preview") {
-				if (!state.active) {
-					notify(ctx, "No active xplan. Start with /xplan or /xplan steps.", "warning");
+				if (!state.active || state.phase === "complete") {
+					notify(
+						ctx,
+						"No active xplan. Start with /xplan or /xplan steps to use xplan commands; if you are approving normal work, reply normally instead of using /xplan approve.",
+						"warning",
+					);
 					return;
 				}
 
@@ -581,7 +603,12 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("before_agent_start", async (event) => {
-		if (!state.active || state.phase === "complete") return undefined;
+		if (!state.active || state.phase === "complete") {
+			approvedImplementationTurnActive = false;
+			return {
+				systemPrompt: event.systemPrompt + inactiveInstructions(),
+			};
+		}
 		if (state.phase === "implementation_failed") {
 			approvedImplementationTurnActive = false;
 		}
