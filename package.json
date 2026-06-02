@@ -1,6 +1,6 @@
 {
   "name": "pi-xplan",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Planning and step-by-step implementation workflow extension for pi with lightweight mutation guards.",
   "type": "module",
   "license": "MIT",
