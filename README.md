@@ -31,7 +31,7 @@ pi install .
 ```text
 /xplan [task]             Start regular plan mode
 /xplan steps [task]       Start bottom-up step-by-step planning mode
-/xplan approve            Approve implementation or review fixes for the current plan/step
+/xplan approve [note]     Approve implementation or review fixes for the current plan/step
 /xplan continue           Accept reviewed work and continue after manual review/staging
 /xplan preview            Print current plan with completed step checkmarks
 /xplan complete           Mark xplan session complete and clear xplan steering
@@ -41,6 +41,8 @@ pi install .
 ```
 
 `[task]` is optional. Without it, xplan only switches mode; your next prompt will run with xplan steering.
+
+`/xplan approve` accepts an optional `[note]` that is passed into the approval prompt, for example `/xplan approve use option 2`. Agents should still ask for plain `/xplan approve` by default; the note is only for user-provided extra context.
 
 ## Behavior
 

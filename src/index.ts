@@ -64,7 +64,7 @@ const DEFAULT_STATE: XPlanState = {
 const HELP = `xplan commands:
 /xplan [task]             Start regular plan mode
 /xplan steps [task]       Start bottom-up step-by-step planning mode
-/xplan approve            Approve implementation or review fixes for the current plan/step
+/xplan approve [note]     Approve implementation or review fixes for the current plan/step
 /xplan continue           Accept reviewed work and continue after manual review/staging
 /xplan preview            Print current plan with completed step checkmarks
 /xplan complete           Mark xplan session complete and clear xplan steering
@@ -447,19 +447,21 @@ function stepsPlanPrompt(task: string): string {
 First build the full feature picture: behavior, data flow, dependencies, integration points, and required code blocks. Then create review-friendly implementation steps from bottom to top. Do not edit files or run mutating commands yet. When the plan is ready, ask me to run /xplan approve to implement the first step.`;
 }
 
-function approvePrompt(state: XPlanState): string {
+function approvePrompt(state: XPlanState, note?: string): string {
+	const approvalNote = note ? `\n\nAdditional approval note:\n${note}` : "";
+
 	if (state.mode === "steps") {
 		const step = state.currentStep > 0 ? state.currentStep : 1;
 		return `[xplan approve] I approve implementation or review fixes for the current xplan step.
 
 This approves the current bottom-up step plan/current step rework. Implement only step ${step}. Keep the diff review-friendly. Do not change git stage, commit, push, pull, rebase, stash, reset, or otherwise mutate git history/state. After implementing this step, stop and ask me to review/stage files manually. If I request fixes to this same awaiting-review step, ask for /xplan approve; if I accept/stage it and want the next step, ask for /xplan continue.
 
-After this approval, /xplan continue is enough to implement each next pending planned step. Do not ask for /xplan approve again unless I request fixes/rework to the current awaiting-review step, the agreed plan/scope changes, or you need to rework a completed/reviewed step due to a conflict.`;
+After this approval, /xplan continue is enough to implement each next pending planned step. Do not ask for /xplan approve again unless I request fixes/rework to the current awaiting-review step, the agreed plan/scope changes, or you need to rework a completed/reviewed step due to a conflict.${approvalNote}`;
 	}
 
 	return `[xplan approve] I approve implementation or review fixes for the current xplan plan.
 
-Implement or rework the approved scope. Do not change git stage, commit, push, pull, rebase, stash, reset, or otherwise mutate git history/state. Review your changes and fix issues you find before stopping for my manual review.`;
+Implement or rework the approved scope. Do not change git stage, commit, push, pull, rebase, stash, reset, or otherwise mutate git history/state. Review your changes and fix issues you find before stopping for my manual review.${approvalNote}`;
 }
 
 function continuePrompt(state: XPlanState, options: { retry?: boolean } = {}): string {
@@ -532,6 +534,7 @@ Hard workflow rules:
 - If xplan is awaiting review and the user requests fixes/rework to the just-implemented current step, ask for /xplan approve; do not ask for /xplan continue.
 - If implementation failed or was interrupted, /xplan continue retries the same approved scope/step instead of advancing.
 - After an approved implementation, stop for manual review/staging. Do not continue implementing more scope until /xplan continue or another explicit approval.
+- When asking for approval, ask the user to run plain /xplan approve. Do not compose long /xplan approve commands; optional notes are user-provided extra context.
 - In approved step mode, /xplan continue means the user accepted/reviewed/staged the previous step and is explicitly approving implementation of the next pending planned step. Do not ask for /xplan approve again merely because that pending step edits an existing file.
 - If the agreed plan/scope changes after completed/reviewed steps and conflicts with previous work, clearly warn that completed steps have conflicts. Explain what must be resolved and wait for /xplan approve before reworking completed/reviewed files.
 `;
@@ -658,7 +661,7 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 
 				const approvedState = transitionState(state, { type: "approve" });
 				setState(ctx, { type: "approve" });
-				sendUserMessage(pi, ctx, approvePrompt(approvedState));
+				sendUserMessage(pi, ctx, approvePrompt(approvedState, task));
 				return;
 			}
 
