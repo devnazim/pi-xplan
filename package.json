@@ -1,6 +1,6 @@
 {
   "name": "pi-xplan",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Planning and step-by-step implementation workflow extension for pi with lightweight mutation guards.",
   "type": "module",
   "license": "MIT",
@@ -28,7 +28,7 @@
     "@earendil-works/pi-coding-agent": ">=0.76.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.78.0",
+    "@earendil-works/pi-coding-agent": "^0.80.3",
     "typescript": "^6.0.3"
   }
 }
