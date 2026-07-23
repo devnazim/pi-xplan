@@ -4,7 +4,7 @@ A small planning workflow extension for [pi](https://pi.dev/) with lightweight m
 
 It adds one slash command, `/xplan`, for regular planning and bottom-up step-by-step implementation planning.
 
-Compatibility: `pi-xplan` uses Pi's extension API as a peer dependency and is intended to work across current Pi releases.
+Compatibility: `pi-xplan` uses Pi's extension API as a peer dependency and supports Pi 0.80.5 and newer.
 
 ## Install / run
 

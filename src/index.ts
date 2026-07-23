@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 
 type XPlanMode = "regular" | "steps";
 type XPlanPhase = "planning" | "implementing" | "implementation_failed" | "awaiting_review" | "complete";
@@ -6,7 +7,6 @@ type XPlanTransition =
 	| { type: "start"; mode: XPlanMode; task?: string }
 	| { type: "approve" }
 	| { type: "continue" }
-	| { type: "resume_implementation" }
 	| { type: "finish_implementation"; outcome: "success" | "failed" }
 	| { type: "complete" };
 
@@ -304,9 +304,6 @@ function transitionState(state: XPlanState, transition: XPlanTransition): XPlanS
 			}
 			return { ...state, phase: "planning" };
 		}
-		case "resume_implementation":
-			if (!state.active || state.phase !== "implementation_failed") return state;
-			return { ...state, phase: "implementing" };
 		case "finish_implementation":
 			if (!state.active || state.phase !== "implementing") return state;
 			return { ...state, phase: transition.outcome === "success" ? "awaiting_review" : "implementation_failed" };
@@ -366,19 +363,8 @@ function implementationFailed(messages: readonly unknown[]): boolean {
 	return true;
 }
 
-function mutationBlockReason(
-	state: XPlanState,
-	toolName: string,
-	input: unknown,
-	options: { allowFailedImplementationMutations?: boolean } = {},
-): string | undefined {
-	if (
-		!state.active ||
-		state.phase === "implementing" ||
-		(state.phase === "implementation_failed" && options.allowFailedImplementationMutations)
-	) {
-		return undefined;
-	}
+function mutationBlockReason(state: XPlanState, toolName: string, input: unknown): string | undefined {
+	if (!state.active || state.phase === "implementing") return undefined;
 
 	const hint = state.phase === "awaiting_review"
 		? state.mode === "steps"
@@ -571,7 +557,10 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 	debugLoggingEnabled = pi.getFlag("xplan-debug") === true;
 
 	let state: XPlanState = { ...DEFAULT_STATE };
-	let approvedImplementationTurnActive = false;
+	let pendingImplementationStart:
+		| { transition: "approve" | "continue"; marker: string; inputAccepted: boolean }
+		| undefined;
+	let pendingImplementationOutcome: "success" | "failed" | undefined;
 	let exitInProgress = false;
 
 	let currentTurnIndex: number | undefined;
@@ -590,12 +579,16 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 			nextState: stateForLog(state),
 		});
 
-		if (transition.type === "approve" || transition.type === "continue" || transition.type === "resume_implementation") {
-			approvedImplementationTurnActive = state.phase === "implementing";
-		} else if (transition.type === "start" || transition.type === "complete") {
-			approvedImplementationTurnActive = false;
-		} else if (transition.type === "finish_implementation" && transition.outcome === "success") {
-			approvedImplementationTurnActive = false;
+		if (transition.type === "start" || transition.type === "complete") {
+			pendingImplementationStart = undefined;
+		}
+		if (
+			transition.type === "start" ||
+			transition.type === "approve" ||
+			transition.type === "continue" ||
+			transition.type === "complete"
+		) {
+			pendingImplementationOutcome = undefined;
 		}
 
 		persistState(pi, state);
@@ -659,9 +652,15 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 					return;
 				}
 
-				const approvedState = transitionState(state, { type: "approve" });
-				setState(ctx, { type: "approve" });
-				sendUserMessage(pi, ctx, approvePrompt(approvedState, task));
+				const prompt = approvePrompt(transitionState(state, { type: "approve" }), task);
+				const marker = `<!-- xplan-turn:${randomUUID()} -->`;
+				pendingImplementationStart = { transition: "approve", marker, inputAccepted: false };
+				try {
+					sendUserMessage(pi, ctx, `${prompt}\n\n${marker}`);
+				} catch (error) {
+					pendingImplementationStart = undefined;
+					throw error;
+				}
 				return;
 			}
 
@@ -684,9 +683,15 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 				}
 
 				const retry = state.phase === "implementation_failed";
-				const continuedState = transitionState(state, { type: "continue" });
-				setState(ctx, { type: "continue" });
-				sendUserMessage(pi, ctx, continuePrompt(continuedState, { retry }));
+				const prompt = continuePrompt(transitionState(state, { type: "continue" }), { retry });
+				const marker = `<!-- xplan-turn:${randomUUID()} -->`;
+				pendingImplementationStart = { transition: "continue", marker, inputAccepted: false };
+				try {
+					sendUserMessage(pi, ctx, `${prompt}\n\n${marker}`);
+				} catch (error) {
+					pendingImplementationStart = undefined;
+					throw error;
+				}
 				return;
 			}
 
@@ -724,6 +729,17 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("input", async (event) => {
+		if (pendingImplementationStart) {
+			if (event.source === "extension" && event.text.includes(pendingImplementationStart.marker)) {
+				pendingImplementationStart.inputAccepted = true;
+				return {
+					action: "transform",
+					text: event.text.replace(pendingImplementationStart.marker, "").trimEnd(),
+				};
+			}
+			pendingImplementationStart = undefined;
+		}
+
 		if (event.source !== "extension" || (state.active && state.phase !== "complete")) return;
 		if (!isXPlanControlPromptText(event.text)) return;
 
@@ -734,15 +750,17 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 		return { action: "handled" };
 	});
 
-	pi.on("before_agent_start", async (event) => {
+	pi.on("before_agent_start", async (event, ctx) => {
+		const implementationStart = pendingImplementationStart;
+		pendingImplementationStart = undefined;
+		if (implementationStart?.inputAccepted) {
+			setState(ctx, { type: implementationStart.transition });
+		}
+
 		if (!state.active || state.phase === "complete") {
-			approvedImplementationTurnActive = false;
 			return {
 				systemPrompt: event.systemPrompt + inactiveInstructions(),
 			};
-		}
-		if (state.phase === "implementation_failed") {
-			approvedImplementationTurnActive = false;
 		}
 
 		return {
@@ -763,9 +781,7 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 	pi.on("tool_call", async (event, ctx) => {
 		const reason = exitInProgress
 			? exitMutationBlockReason(event.toolName, event.input)
-			: mutationBlockReason(state, event.toolName, event.input, {
-					allowFailedImplementationMutations: approvedImplementationTurnActive,
-				});
+			: mutationBlockReason(state, event.toolName, event.input);
 		if ((state.active || exitInProgress) && (reason || MUTATING_TOOLS.has(event.toolName) || event.toolName === "bash")) {
 			logDebug("tool_call", {
 				toolName: event.toolName,
@@ -788,9 +804,6 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 	pi.on("turn_start", async (event, ctx) => {
 		currentTurnIndex = event.turnIndex;
 		if (!state.active) return;
-		if (state.phase === "implementation_failed" && approvedImplementationTurnActive) {
-			setState(ctx, { type: "resume_implementation" });
-		}
 
 		logDebug("turn_start", {
 			turnIndex: currentTurnIndex,
@@ -814,6 +827,10 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("agent_end", async (event, ctx) => {
+		if (state.active && state.phase === "implementing") {
+			pendingImplementationOutcome = implementationFailed(event.messages) ? "failed" : "success";
+		}
+
 		if (state.active) {
 			logDebug("agent_end", {
 				turnIndex: currentTurnIndex,
@@ -821,13 +838,28 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 				hasPendingMessages: ctx.hasPendingMessages(),
 				signalActive: ctx.signal !== undefined,
 				state: stateForLog(state),
+				pendingImplementationOutcome,
+			});
+		}
+	});
+
+	pi.on("agent_settled", async (_event, ctx) => {
+		if (state.active) {
+			logDebug("agent_settled", {
+				turnIndex: currentTurnIndex,
+				isIdle: ctx.isIdle(),
+				hasPendingMessages: ctx.hasPendingMessages(),
+				signalActive: ctx.signal !== undefined,
+				state: stateForLog(state),
+				pendingImplementationOutcome,
 			});
 		}
 
+		const outcome = pendingImplementationOutcome ?? "failed";
+		pendingImplementationOutcome = undefined;
 		if (state.active && state.phase === "implementing") {
-			const failed = implementationFailed(event.messages);
-			setState(ctx, { type: "finish_implementation", outcome: failed ? "failed" : "success" });
-			if (failed) {
+			setState(ctx, { type: "finish_implementation", outcome });
+			if (outcome === "failed") {
 				notify(ctx, "xplan implementation step failed or was interrupted. Fix/retry with /xplan continue when ready.", "warning");
 			} else {
 				notify(ctx, "xplan implementation step finished. Review/stage manually. Use /xplan approve for review fixes, /xplan continue to accept and move on, or /xplan complete to finish.", "info");
@@ -842,6 +874,8 @@ export default function xplanExtension(pi: ExtensionAPI): void {
 		debugLoggingEnabled = pi.getFlag("xplan-debug") === true;
 		const previousState = cloneState(state);
 		const idle = ctx.isIdle();
+		pendingImplementationStart = undefined;
+		pendingImplementationOutcome = undefined;
 		exitInProgress = false;
 		const preserveImplementing = event.reason === "reload";
 		const restored = restoreState(ctx, { preserveImplementing });

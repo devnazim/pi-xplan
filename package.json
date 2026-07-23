@@ -22,13 +22,14 @@
     ]
   },
   "scripts": {
+    "test": "node --test test/*.test.js",
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.76.0"
+    "@earendil-works/pi-coding-agent": ">=0.80.5"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.80.3",
-    "typescript": "^6.0.3"
+    "@earendil-works/pi-coding-agent": "^0.81.1",
+    "typescript": "^7.0.2"
   }
 }
