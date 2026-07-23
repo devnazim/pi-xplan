@@ -1,9 +1,20 @@
 {
   "name": "pi-xplan",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "description": "Planning and step-by-step implementation workflow extension for pi with lightweight mutation guards.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/devnazim/pi-xplan.git"
+  },
+  "homepage": "https://github.com/devnazim/pi-xplan#readme",
+  "bugs": {
+    "url": "https://github.com/devnazim/pi-xplan/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -13,6 +24,7 @@
   "files": [
     "src/",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "tsconfig.json"
   ],
@@ -23,7 +35,8 @@
   },
   "scripts": {
     "test": "node --test test/*.test.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm test && npm run typecheck"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.80.5"
